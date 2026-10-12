@@ -63,6 +63,17 @@ public:
     ros::Publisher vision_pose_pub;
     ros::Subscriber odom_sub;
 
+    /* 2026-10-12 增加：
+     * frame_id_     : 发布出去的位姿使用的 frame_id；留空表示沿用源里程计消息里的 frame_id
+     * odom_timeout_ : 输入里程计的超时时间(秒)；超时后停止发布，
+     *                 避免把冻结的位姿当成有效视觉位姿继续喂给飞控
+     * publish_rate  : 发布频率(Hz)
+     */
+    std::string frame_id_;
+    double odom_timeout_;
+    double publish_rate;
+    ros::Time last_odom_recv_;
+
     void vrpn_pose_cb(const geometry_msgs::PoseStamped::ConstPtr& msg);
     void openvins_pose_cb(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg);
     void px4Pose_cb(const geometry_msgs::PoseStamped::ConstPtr& msg);
@@ -78,12 +89,17 @@ vision_pose::vision_pose(const ros::NodeHandle &nh_, const ros::NodeHandle &nh_p
     nh_private.param<std::string>("uavname", uavName, "px4_uav1");
     nh_private.param<std::string>("pose_estimate_source",pose_estimate_source_,"open_vins");
     nh_private.param<bool>("only_vrpn", only_vrpn,"false");
+    // 2026-10-12 增加：发布频率 / frame_id / 输入超时，均可由 launch 配置
+    nh_private.param<double>("publish_rate", publish_rate, 30.0);
+    nh_private.param<std::string>("frame_id", frame_id_, "");
+    nh_private.param<double>("odom_timeout", odom_timeout_, 0.5);
 
     if (pose_estimate_source_=="t265") pose_source_=REALSENSE_T265;
 
     pi = 3.1415926;
     setupTime = 10;
-    rate = new ros::Rate(30);
+    rate = new ros::Rate(publish_rate);
+    last_odom_recv_ = ros::Time(0);
 
 
    // vrpn_pose_sub = nh.subscribe<geometry_msgs::PoseStamped>("/vrpn_client_node/" + uavName + "/pose", 1, &vision_pose::vrpn_pose_cb,this);
@@ -115,6 +131,10 @@ void vision_pose::estimator_odom_cb(const nav_msgs::Odometry::ConstPtr& msg)
 {
     estimatedPose.pose = msg->pose.pose;
 
+    /* 2026-10-12 增加：原实现只拷贝了 pose.pose，header 从未赋值（frame_id 一直是空的）。
+     * 这里补上：优先用 launch 参数 frame_id，未配置时沿用源里程计消息的 frame_id。 */
+    estimatedPose.header.frame_id = frame_id_.empty() ? msg->header.frame_id : frame_id_;
+
     tf2::Quaternion quat;
     tf2::fromMsg(msg->pose.pose.orientation, quat);
     double roll, pitch, yaw;
@@ -124,6 +144,7 @@ void vision_pose::estimator_odom_cb(const nav_msgs::Odometry::ConstPtr& msg)
     estimatedAttitude.yaw = yaw * 180 / pi;
 
     estimatedOdomRec_flag = true;
+    last_odom_recv_ = ros::Time::now();   // 2026-10-12：记录收到时刻，供超时判断
 }
 
 
@@ -185,15 +206,21 @@ void vision_pose::vrpn_pose_cb(const geometry_msgs::PoseStamped::ConstPtr& msg)
 
 void vision_pose::start()
 {
-    double errx, erry, errz;
     while(ros::ok())
     {
      	
         if(estimatedOdomRec_flag == false){
             cout << "\033[K" << "\033[31m estimatedPose no receive!!! \033[0m" << endl;
-	    }else {
+	    } else if (odom_timeout_ > 0.0 &&
+	               (ros::Time::now() - last_odom_recv_).toSec() > odom_timeout_) {
+            /* 2026-10-12 增加：输入里程计中断超过 odom_timeout_ 秒后停止发布。
+             * 否则节点会把最后一帧位姿配上新鲜的时间戳反复发出去，
+             * 飞控会把这份"冻结"的视觉位姿当成有效观测继续融合。 */
+            ROS_WARN_THROTTLE(2.0, "odometry stale for %.2fs, vision pose NOT published",
+                              (ros::Time::now() - last_odom_recv_).toSec());
+        } else {
             estimatedPose.header.stamp = ros::Time::now();
-		    vision_pose_pub.publish(estimatedPose);
+	    vision_pose_pub.publish(estimatedPose);
             
 
         }
