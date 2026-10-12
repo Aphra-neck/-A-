@@ -1,0 +1,23 @@
+<launch>
+    <!--
+      Publish the LIO/EKF odometry to PX4 as the external-vision (VISION_POSITION_ESTIMATE)
+      position source.
+
+      vision_pose.cpp subscribes to the hard-coded topic /aft_mapped_to_init (FAST-LIO default)
+      and republishes the pose on mavros/vision_pose/pose at 30 Hz. Here we remap that input to
+      this vehicle's actual odometry topic, /ekf/ekf_odom (IMU + laserMapping/odometry fusion),
+      so no source change is needed.
+
+      Chain on board:
+        Livox MID360 -> /livox/lidar -> faster_lio -> /laserMapping/odometry
+        /mavros/imu/data + /laserMapping/odometry -> ekf -> /ekf/ekf_odom
+        /ekf/ekf_odom -> vision_pose_node -> /mavros/vision_pose/pose -> PX4 EKF2 (EKF2_EV_CTRL)
+
+      Check after launching:
+        rostopic hz /mavros/vision_pose/pose        # expect ~30 Hz
+        rostopic echo -n1 /mavros/estimator_status  # EV position/velocity flags should go true
+    -->
+    <node pkg="camera_pose_node" type="vision_pose_node" name="vision_pose_node" output="screen">
+        <remap from="/aft_mapped_to_init" to="/ekf/ekf_odom"/>
+    </node>
+</launch>
